@@ -335,7 +335,7 @@ const uiHTML = `<!DOCTYPE html>
 
   #viewport { flex: 1; overflow: hidden; position: relative; cursor: grab; }
   #viewport.dragging { cursor: grabbing; }
-  #canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; display: flex; flex-direction: row; align-items: flex-start; gap: 20px; padding: 30px; }
+  #canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; display: flex; flex-flow: row wrap; align-items: flex-start; align-content: flex-start; gap: 20px; padding: 30px; }
 
   .card { width: max-content; min-width: 420px; flex-shrink: 0; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.4); transition: border-color 0.15s; }
   .card.latest { border-color: #58a6ff; box-shadow: 0 0 0 1px #58a6ff44, 0 4px 24px rgba(0,0,0,0.4); }
@@ -349,7 +349,12 @@ const uiHTML = `<!DOCTYPE html>
   mark.annotation { background: #f0c27444; border-radius: 2px; cursor: pointer; outline: 1px solid transparent; transition: outline-color 0.2s, background 0.2s; }
   mark.annotation.active { outline-color: #f0c274; background: #f0c27466; }
 
-  .card-body { display: flex; flex-direction: row; }
+  /* position: relative makes this the offsetParent for its descendants (mark,
+     pre, code) -- layoutAnnotations()'s offsetTop walk assumes exactly that,
+     stopping here in one hop. Without it, none of mark/code/pre/.card/.card-body
+     are positioned, so offsetParent skips all of them straight to #canvas,
+     and the walk keeps climbing past its intended stop, wildly overshooting. */
+  .card-body { display: flex; flex-direction: row; position: relative; }
   .card-body pre { flex: none; }
   .ann-panel { position: relative; width: 240px; min-height: 40px; flex-shrink: 0; display: none; border-left: 1px solid #21262d; }
   .ann-panel.has-items { display: block; }
@@ -402,8 +407,6 @@ const uiHTML = `<!DOCTYPE html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/rust.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/diff2html/3.4.47/bundles/js/diff2html-ui.min.js"></script>
 <script>
-const CARD_WIDTH = 520;
-const CARD_GAP = 20;
 const CARD_PAD = 30;
 
 const viewport = document.getElementById('viewport');
@@ -535,16 +538,50 @@ function addCard(e) {
   panToLatest();
 }
 
+// fitAll wraps cards into a grid instead of always laying every card out in
+// one ever-widening row (a handful of cards used to produce a screenshot
+// several times wider than tall). Rather than assume a fixed card shape or
+// solve for it with a closed-form formula -- which picks bad column counts
+// once a min-width floor and gaps matter, e.g. always preferring 1 column
+// over a demonstrably-better-fitting 2 -- this tries a range of candidate
+// wrap-widths and keeps whichever actually maximizes the resulting scale
+// (equivalently, wastes the least viewport space), using real measured
+// layout rather than averages.
 function fitAll() {
   if (!cards.length) return;
   const vw = viewport.clientWidth;
   const vh = viewport.clientHeight;
-  let totalW = CARD_PAD * 2 + (cards.length - 1) * CARD_GAP;
-  cards.forEach(c => totalW += c.offsetWidth);
-  const totalH = CARD_PAD * 2 + 660;
-  scale = Math.min(vw / totalW, vh / totalH, 1);
-  panX = (vw - totalW * scale) / 2;
-  panY = (vh - totalH * scale) / 2;
+
+  canvas.style.width = 'max-content';
+  let maxCardW = 0;
+  cards.forEach(c => { maxCardW = Math.max(maxCardW, c.offsetWidth); });
+  const naturalWidth = canvas.scrollWidth; // every card in a single row
+
+  function measureAt(w) {
+    canvas.style.width = w + 'px';
+    let maxRight = 0, maxBottom = 0;
+    cards.forEach(c => {
+      maxRight = Math.max(maxRight, c.offsetLeft + c.offsetWidth);
+      maxBottom = Math.max(maxBottom, c.offsetTop + c.offsetHeight);
+    });
+    return { w: maxRight + CARD_PAD, h: maxBottom + CARD_PAD };
+  }
+
+  const SAMPLES = 30;
+  const step = Math.max(10, Math.round((naturalWidth - maxCardW) / SAMPLES));
+  let bestWidth = maxCardW;
+  let best = measureAt(bestWidth);
+  let bestFactor = Math.max(best.w / vw, best.h / vh);
+  for (let w = maxCardW + step; w <= naturalWidth; w += step) {
+    const box = measureAt(w);
+    const factor = Math.max(box.w / vw, box.h / vh);
+    if (factor < bestFactor) { bestFactor = factor; best = box; bestWidth = w; }
+  }
+  canvas.style.width = bestWidth + 'px';
+
+  scale = Math.min(vw / best.w, vh / best.h, 1);
+  panX = (vw - best.w * scale) / 2;
+  panY = (vh - best.h * scale) / 2;
   applyTransform();
 }
 
@@ -552,13 +589,13 @@ function panToCard(idx) {
   if (idx < 0 || idx >= cards.length) return;
   currentCardIdx = idx;
   cards.forEach((c, i) => c.classList.toggle('latest', i === idx));
-  let cardLeft = CARD_PAD;
-  for (let i = 0; i < idx; i++) cardLeft += cards[i].offsetWidth + CARD_GAP;
-  const w = cards[idx].offsetWidth;
+  const card = cards[idx];
   const vw = viewport.clientWidth;
   const vh = viewport.clientHeight;
-  panX = vw / 2 - (cardLeft + w / 2) * scale;
-  panY = vh / 2 - 300 * scale;
+  const cx = card.offsetLeft + card.offsetWidth / 2;
+  const cy = card.offsetTop + card.offsetHeight / 2;
+  panX = vw / 2 - cx * scale;
+  panY = vh / 2 - cy * scale;
   applyTransform();
 }
 
